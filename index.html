@@ -375,22 +375,31 @@
         function connectToSignalingServer() {
             try {
                 updateStatus('WebSocket sunucusuna bağlanılıyor...', 'connecting');
+                console.log('🔌 WebSocket bağlantısı kuruluyor:', WS_URL);
                 
                 socket = new WebSocket(WS_URL);
 
                 socket.onopen = () => {
-                    console.log('WebSocket bağlantısı kuruldu');
+                    console.log('✅ WebSocket bağlantısı kuruldu');
                     updateStatus('Sunucuya bağlandı! Kullanıcı adınızı girin.', 'connected');
                 };
 
                 socket.onmessage = (event) => {
-                    const data = JSON.parse(event.data);
-                    handleSignalingMessage(data);
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleSignalingMessage(data);
+                    } catch (error) {
+                        console.error('❌ Mesaj parse hatası:', error);
+                    }
                 };
 
-                socket.onclose = () => {
-                    console.log('WebSocket bağlantısı kapandı');
+                socket.onclose = (event) => {
+                    console.log('❌ WebSocket bağlantısı kapandı:', event.code, event.reason);
                     updateStatus('Sunucu bağlantısı kesildi. Yeniden bağlanılıyor...', 'disconnected');
+                    
+                    // Değişkenleri sıfırla
+                    currentPartner = null;
+                    isConnecting = false;
                     
                     // 3 saniye sonra yeniden bağlanmayı dene
                     setTimeout(() => {
@@ -401,12 +410,12 @@
                 };
 
                 socket.onerror = (error) => {
-                    console.error('WebSocket hatası:', error);
+                    console.error('💥 WebSocket hatası:', error);
                     updateStatus('Sunucu bağlantı hatası!', 'disconnected');
                 };
 
             } catch (error) {
-                console.error('Bağlantı hatası:', error);
+                console.error('❌ Bağlantı hatası:', error);
                 updateStatus('Sunucuya bağlanılamadı!', 'disconnected');
                 
                 // 5 saniye sonra tekrar dene
@@ -467,18 +476,40 @@
         }
 
         function findRandomPartner() {
-            if (isConnecting) return;
+            if (isConnecting) {
+                console.log('⚠️ Zaten bağlantı aranıyor, işlem iptal edildi');
+                return;
+            }
+            
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                console.log('❌ WebSocket bağlantısı yok!');
+                showError('Sunucu bağlantısı yok! Sayfa yenileniyor...');
+                setTimeout(() => location.reload(), 2000);
+                return;
+            }
             
             isConnecting = true;
             updateStatus('Rastgele bir kullanıcı aranıyor...', 'waiting');
             document.getElementById('nextBtn').disabled = true;
             document.getElementById('remoteLabel').textContent = 'Aranıyor...';
             
+            console.log('🔍 Partner arama başlatıldı:', username);
+            
             // Oda oluştur ve eşleşme bekle
             sendToServer({
                 type: 'find-partner',
                 username: username
             });
+            
+            // 10 saniye timeout ekle
+            setTimeout(() => {
+                if (isConnecting && !currentPartner) {
+                    console.log('⏰ Partner arama timeout!');
+                    isConnecting = false;
+                    document.getElementById('nextBtn').disabled = false;
+                    updateStatus('Uygun kullanıcı bulunamadı. Tekrar deneyin.', 'disconnected');
+                }
+            }, 10000);
         }
 
         function findNewPartner() {
@@ -495,45 +526,62 @@
         }
 
         async function handleSignalingMessage(data) {
-            console.log('Signaling mesajı alındı:', data);
+            console.log('📨 Signaling mesajı alındı:', data);
 
             switch (data.type) {
+                case 'connection-established':
+                    console.log('✅ WebSocket bağlantısı onaylandı');
+                    break;
+
                 case 'partner-found':
+                    console.log('🎉 Partner bulundu:', data);
                     await handlePartnerFound(data);
                     break;
 
+                case 'waiting':
+                    console.log('⏳ Bekleme durumu:', data);
+                    updateStatus(`Uygun kullanıcı aranıyor... (${data.waitingCount} bekleyen)`, 'waiting');
+                    break;
+
                 case 'partner-left':
+                    console.log('💔 Partner ayrıldı');
                     handlePartnerLeft();
                     break;
 
                 case 'offer':
+                    console.log('📞 Offer alındı');
                     await handleOffer(data.offer);
                     break;
 
                 case 'answer':
+                    console.log('📱 Answer alındı');
                     await handleAnswer(data.answer);
                     break;
 
                 case 'ice-candidate':
+                    console.log('🧊 ICE candidate alındı');
                     await handleIceCandidate(data.candidate);
                     break;
 
                 case 'chat-message':
+                    console.log('💬 Chat mesajı alındı');
                     handleChatMessage(data);
                     break;
 
                 case 'user-count':
+                    console.log('👥 Kullanıcı sayısı güncellendi:', data.count);
                     updateUserCount(data.count);
                     break;
 
                 case 'error':
+                    console.error('❌ Sunucu hatası:', data.message);
                     showError(data.message);
                     isConnecting = false;
                     document.getElementById('nextBtn').disabled = false;
                     break;
 
                 default:
-                    console.log('Bilinmeyen mesaj tipi:', data.type);
+                    console.log('❓ Bilinmeyen mesaj tipi:', data.type);
             }
         }
 
@@ -783,7 +831,13 @@
 
         function sendToServer(data) {
             if (socket && socket.readyState === WebSocket.OPEN) {
+                console.log('📤 Sunucuya mesaj gönderiliyor:', data.type, data);
                 socket.send(JSON.stringify(data));
+                return true;
+            } else {
+                console.error('❌ WebSocket bağlantısı yok veya kapalı!');
+                showError('Sunucu bağlantısı kesildi!');
+                return false;
             }
         }
 
