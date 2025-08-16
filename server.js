@@ -44,6 +44,7 @@ const wss = new WebSocket.Server({ server });
 const connections = new Map(); // socket -> user data
 const waitingQueue = []; // Eşleşme bekleyen kullanıcılar
 const activeMatches = new Map(); // socket -> partner socket
+const userHistory = new Map(); // userId -> Set of partner userIds (eşleşme geçmişi)
 
 // Rastgele kullanıcı ID oluşturma
 function generateUserId() {
@@ -65,11 +66,14 @@ function broadcastUserCount() {
     });
 }
 
-// Rastgele eşleşme bul
+// Rastgele eşleşme bul - yeni algoritma ile
 function findMatch(socket) {
     const currentUser = connections.get(socket);
     if (!currentUser) return;
 
+    // Mevcut kullanıcının eşleşme geçmişini al
+    const currentUserHistory = userHistory.get(currentUser.id) || new Set();
+    
     // Kendi kendine eşleşmeyi önle ve bekleyen kullanıcıları filtrele
     const availableUsers = waitingQueue.filter(waitingSocket => {
         const waitingUser = connections.get(waitingSocket);
@@ -79,39 +83,73 @@ function findMatch(socket) {
                !activeMatches.has(waitingSocket);
     });
 
-    if (availableUsers.length > 0) {
-        // Rastgele bir kullanıcı seç
-        const randomIndex = Math.floor(Math.random() * availableUsers.length);
-        const partnerSocket = availableUsers[randomIndex];
-        const partnerUser = connections.get(partnerSocket);
-
-        // Her iki kullanıcıyı da bekleme kuyruğundan çıkar
-        removeFromWaitingQueue(socket);
-        removeFromWaitingQueue(partnerSocket);
-
-        // Eşleşmeyi kaydet
-        activeMatches.set(socket, partnerSocket);
-        activeMatches.set(partnerSocket, socket);
-
-        // Her iki kullanıcıya da eşleşmeyi bildir
-        socket.send(JSON.stringify({
-            type: 'partner-found',
-            partner: partnerUser.username,
-            isInitiator: true
-        }));
-
-        partnerSocket.send(JSON.stringify({
-            type: 'partner-found',
-            partner: currentUser.username,
-            isInitiator: false
-        }));
-
-        console.log(`Eşleşme oluşturuldu: ${currentUser.username} <-> ${partnerUser.username}`);
-        
-        return true;
+    if (availableUsers.length === 0) {
+        return false;
     }
 
-    return false;
+    // Eşleşme stratejisi: Önce yeni kullanıcıları tercih et, sonra eskilerle de eşleş
+    let selectedPartner = null;
+    
+    // Strateji 1: Daha önce hiç konuşmadığı kullanıcıları bul
+    const newUsers = availableUsers.filter(waitingSocket => {
+        const waitingUser = connections.get(waitingSocket);
+        return waitingUser && !currentUserHistory.has(waitingUser.id);
+    });
+    
+    // Strateji 2: Eğer yeni kullanıcı varsa onlardan birini seç
+    if (newUsers.length > 0) {
+        const randomIndex = Math.floor(Math.random() * newUsers.length);
+        selectedPartner = newUsers[randomIndex];
+        console.log(`${currentUser.username} için YENİ kullanıcı bulundu`);
+    } 
+    // Strateji 3: Yeni kullanıcı yoksa, daha önce konuştuklarından rastgele seç
+    else {
+        const randomIndex = Math.floor(Math.random() * availableUsers.length);
+        selectedPartner = availableUsers[randomIndex];
+        console.log(`${currentUser.username} için ESKİ kullanıcı ile yeniden eşleşme`);
+    }
+
+    if (!selectedPartner) return false;
+
+    const partnerUser = connections.get(selectedPartner);
+    
+    // Her iki kullanıcıyı da bekleme kuyruğundan çıkar
+    removeFromWaitingQueue(socket);
+    removeFromWaitingQueue(selectedPartner);
+
+    // Eşleşmeyi kaydet
+    activeMatches.set(socket, selectedPartner);
+    activeMatches.set(selectedPartner, socket);
+    
+    // Eşleşme geçmişini güncelle (her iki taraf için)
+    if (!userHistory.has(currentUser.id)) {
+        userHistory.set(currentUser.id, new Set());
+    }
+    if (!userHistory.has(partnerUser.id)) {
+        userHistory.set(partnerUser.id, new Set());
+    }
+    
+    userHistory.get(currentUser.id).add(partnerUser.id);
+    userHistory.get(partnerUser.id).add(currentUser.id);
+
+    // Her iki kullanıcıya da eşleşmeyi bildir
+    socket.send(JSON.stringify({
+        type: 'partner-found',
+        partner: partnerUser.username,
+        isInitiator: true,
+        isReconnection: currentUserHistory.has(partnerUser.id) // Tekrar eşleşme mi?
+    }));
+
+    selectedPartner.send(JSON.stringify({
+        type: 'partner-found',
+        partner: currentUser.username,
+        isInitiator: false,
+        isReconnection: userHistory.get(partnerUser.id).has(currentUser.id) // Tekrar eşleşme mi?
+    }));
+
+    console.log(`Eşleşme oluşturuldu: ${currentUser.username} <-> ${partnerUser.username} ${currentUserHistory.has(partnerUser.id) ? '(TEKRAR)' : '(YENİ)'}`);
+    
+    return true;
 }
 
 // Kullanıcıyı bekleme kuyruğuna ekle
@@ -251,17 +289,37 @@ function handleFindPartner(socket, data) {
         return;
     }
 
+    // Var olan kullanıcıyı kontrol et (tekrar bağlanan kullanıcı için)
+    let userId = generateUserId();
+    let existingHistory = new Set();
+    
+    // Aynı kullanıcı adına sahip önceki kayıtları ara (basit tekrar bağlanma tespiti)
+    for (const [existingUserId, history] of userHistory.entries()) {
+        // Bu basit bir yaklaşım - gerçek uygulamada daha sofistike kimlik doğrulama kullanılabilir
+        if (existingUserId.includes(username)) {
+            userId = existingUserId;
+            existingHistory = history;
+            console.log(`${username} tekrar bağlandı - geçmiş eşleşmeler geri yüklendi: ${existingHistory.size}`);
+            break;
+        }
+    }
+
     // Kullanıcıyı kaydet
-    const userId = generateUserId();
     const user = {
         id: userId,
         username: username.trim(),
         socket: socket,
-        joinedAt: new Date()
+        joinedAt: new Date(),
+        previousConnections: existingHistory.size // İstatistik için
     };
     
     connections.set(socket, user);
-    console.log(`Yeni kullanıcı kaydedildi: ${username}`);
+    console.log(`Kullanıcı kaydedildi: ${username} (ID: ${userId}) - Önceki eşleşme: ${existingHistory.size}`);
+    
+    // Geçmişi güncelle (eğer yeni kullanıcıysa)
+    if (!userHistory.has(userId)) {
+        userHistory.set(userId, new Set());
+    }
     
     // Mevcut eşleşmesi varsa sonlandır
     if (activeMatches.has(socket)) {
@@ -277,7 +335,7 @@ function handleFindPartner(socket, data) {
     // Eşleşme bulunamadıysa bekleme kuyruğuna ekle
     if (!matchFound) {
         addToWaitingQueue(socket);
-        console.log(`${username} eşleşme bekliyor...`);
+        console.log(`${username} eşleşme bekliyor... (Geçmiş partner sayısı: ${existingHistory.size})`);
     }
     
     // Kullanıcı sayısını güncelle
@@ -361,8 +419,12 @@ function handleDisconnect(socket) {
     const user = connections.get(socket);
     connections.delete(socket);
     
+    // NOT: userHistory'yi silmiyoruz - böylece kullanıcı tekrar bağlandığında geçmişi hatırlanır
+    // userHistory.delete(user?.id); // Bu satırı kasten yorum yapıyoruz
+    
     if (user) {
-        console.log(`Kullanıcı ayrıldı: ${user.username}`);
+        console.log(`Kullanıcı ayrıldı: ${user.username} (ID: ${user.id})`);
+        console.log(`Kullanıcının eşleşme geçmişi korundu: ${userHistory.get(user.id)?.size || 0} partner`);
     }
     
     // Kullanıcı sayısını güncelle
@@ -432,11 +494,16 @@ setInterval(() => {
 
 // Sunucu istatistikleri - her dakika
 setInterval(() => {
+    const totalHistoryEntries = Array.from(userHistory.values()).reduce((sum, set) => sum + set.size, 0);
+    const averageConnections = userHistory.size > 0 ? (totalHistoryEntries / userHistory.size).toFixed(1) : 0;
+    
     console.log('📊 Sunucu İstatistikleri:');
     console.log(`   👥 Aktif kullanıcı: ${connections.size}`);
     console.log(`   ⏳ Bekleyen: ${waitingQueue.length}`);
     console.log(`   💑 Aktif eşleşme: ${Math.floor(activeMatches.size / 2)}`);
     console.log(`   🔌 WebSocket bağlantısı: ${wss.clients.size}`);
+    console.log(`   📚 Kayıtlı kullanıcı geçmişi: ${userHistory.size}`);
+    console.log(`   🔄 Ortalama eşleşme/kullanıcı: ${averageConnections}`);
     console.log(`   ⏱️  Çalışma süresi: ${Math.floor(process.uptime())}s`);
     console.log('───────────────────────────────────────');
 }, 60000); // Her dakika

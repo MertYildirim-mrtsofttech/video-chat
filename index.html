@@ -283,6 +283,8 @@
         
         <div class="user-count" id="userCount">
             <span id="onlineUsers">-- çevrimiçi kullanıcı</span>
+            <br>
+            <small style="opacity: 0.8;">💫 Daha önce konuştuklarınızla tekrar eşleşebilirsiniz</small>
         </div>
 
         <div class="login-section" id="loginSection">
@@ -338,7 +340,7 @@
         let currentPartner = null;
 
         // WebSocket sunucu URL'si (yerel geliştirme için)
-        const WS_URL = 'wss://video-chat-jozk.onrender.com';
+        const WS_URL = 'ws://localhost:3000';
 
         // WebRTC konfigürasyonu
         const rtcConfig = {
@@ -486,7 +488,7 @@
             }
             
             clearChat();
-            addSystemMessage('Yeni bir kullanıcı aranıyor...');
+            addSystemMessage('🔄 Yeni bir kullanıcı aranıyor... (Daha önce konuştuklarınızla da eşleşebilirsiniz)');
             
             // Yeni partner ara
             findRandomPartner();
@@ -541,8 +543,16 @@
             document.getElementById('nextBtn').disabled = false;
             document.getElementById('remoteLabel').textContent = currentPartner;
             
-            updateStatus(`${currentPartner} ile eşleşildi! Bağlantı kuruluyor...`, 'connecting');
-            addSystemMessage(`${currentPartner} ile konuşmaya başladınız!`);
+            const connectionType = data.isReconnection ? 'tekrar bağlandı' : 'eşleşildi';
+            const statusIcon = data.isReconnection ? '🔄' : '✨';
+            
+            updateStatus(`${statusIcon} ${currentPartner} ile ${connectionType}! Bağlantı kuruluyor...`, 'connecting');
+            
+            const systemMessage = data.isReconnection 
+                ? `🔄 ${currentPartner} ile daha önce konuşmuştunuz! Tekrar bağlandınız.`
+                : `✨ ${currentPartner} ile ilk kez konuşuyorsunuz!`;
+            
+            addSystemMessage(systemMessage);
 
             // WebRTC bağlantısını başlat
             await createPeerConnection();
@@ -561,7 +571,7 @@
 
         function handlePartnerLeft() {
             updateStatus('Partner ayrıldı. Yeni kullanıcı aranıyor...', 'waiting');
-            addSystemMessage('Karşıdaki kullanıcı ayrıldı.');
+            addSystemMessage('💔 Karşıdaki kullanıcı ayrıldı. Yeni biri aranıyor...');
             
             disconnectFromPartner();
             clearRemoteVideo();
