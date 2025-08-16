@@ -23,12 +23,17 @@ const server = http.createServer((req, res) => {
         });
     } else if (req.url === '/status') {
         // Sunucu durumu endpoint'i
+        const availableUsers = [...connections.values()].filter(user => user.status === 'available').length;
+        const inCallUsers = [...connections.values()].filter(user => user.status === 'in-call').length;
+        
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             status: 'online',
-            activeConnections: wss ? wss.clients.size : 0,
+            totalConnections: wss ? wss.clients.size : 0,
+            availableUsers: availableUsers,
+            usersInCall: inCallUsers,
             waitingUsers: waitingQueue.length,
-            activeMatches: Math.floor(connections.size / 2),
+            activeMatches: Math.floor(activeMatches.size / 2),
             uptime: process.uptime()
         }));
     } else {
@@ -40,6 +45,14 @@ const server = http.createServer((req, res) => {
 // WebSocket sunucusu oluştur
 const wss = new WebSocket.Server({ server });
 
+// Kullanıcı durumları
+const USER_STATUS = {
+    AVAILABLE: 'available',      // Müsait - eşleştirilebilir
+    WAITING: 'waiting',          // Partner arıyor
+    IN_CALL: 'in-call',         // Aktif görüşmede - rahatsız edilemez
+    DISCONNECTING: 'disconnecting' // Ayrılma sürecinde
+};
+
 // Aktif bağlantıları ve kullanıcıları saklamak için
 const connections = new Map(); // socket -> user data
 const waitingQueue = []; // Eşleşme bekleyen kullanıcılar
@@ -49,6 +62,25 @@ const userHistory = new Map(); // userId -> Set of partner userIds (eşleşme ge
 // Rastgele kullanıcı ID oluşturma
 function generateUserId() {
     return 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// Kullanıcı durumunu güncelle
+function updateUserStatus(socket, status) {
+    const user = connections.get(socket);
+    if (user) {
+        const oldStatus = user.status;
+        user.status = status;
+        user.statusUpdatedAt = new Date();
+        
+        console.log(`👤 ${user.username}: ${oldStatus} → ${status}`);
+        
+        // Eğer kullanıcı görüşmeye geçtiyse, onu bekleme kuyruğundan çıkar
+        if (status === USER_STATUS.IN_CALL) {
+            removeFromWaitingQueue(socket);
+        }
+        
+        broadcastUserStats();
+    }
 }
 
 // Kullanıcı sayısını tüm bağlı istemcilere gönder
@@ -66,7 +98,35 @@ function broadcastUserCount() {
     });
 }
 
-// Rastgele eşleşme bul - basitleştirilmiş versiyon
+// Detaylı kullanıcı istatistiklerini gönder
+function broadcastUserStats() {
+    const stats = getUserStats();
+    const message = JSON.stringify({
+        type: 'user-stats',
+        ...stats
+    });
+
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
+}
+
+// Kullanıcı istatistiklerini al
+function getUserStats() {
+    const allUsers = [...connections.values()];
+    return {
+        total: allUsers.length,
+        available: allUsers.filter(u => u.status === USER_STATUS.AVAILABLE).length,
+        waiting: allUsers.filter(u => u.status === USER_STATUS.WAITING).length,
+        inCall: allUsers.filter(u => u.status === USER_STATUS.IN_CALL).length,
+        waitingQueue: waitingQueue.length,
+        activeMatches: Math.floor(activeMatches.size / 2)
+    };
+}
+
+// Rastgele eşleşme bul - sadece müsait kullanıcılar arasında
 function findMatch(socket) {
     const currentUser = connections.get(socket);
     if (!currentUser) {
@@ -74,40 +134,59 @@ function findMatch(socket) {
         return false;
     }
 
-    console.log(`🔍 ${currentUser.username} için eşleşme aranıyor...`);
+    // Kullanıcı durumunu kontrol et
+    if (currentUser.status === USER_STATUS.IN_CALL) {
+        console.log(`⚠️ ${currentUser.username} zaten görüşmede, eşleştirme yapılmadı`);
+        return false;
+    }
+
+    console.log(`🔍 ${currentUser.username} için eşleştirme aranıyor...`);
     console.log(`📊 Toplam bekleyen kullanıcı: ${waitingQueue.length}`);
     
-    // Kendi kendine eşleşmeyi önle ve bekleyen kullanıcıları filtrele
+    // SADECE MÜSAİT KULLANICILARI FİLTRELE
     const availableUsers = waitingQueue.filter(waitingSocket => {
         if (waitingSocket === socket) {
-            console.log('⚠️  Kendisi filtrelendi');
+            console.log('⚠️ Kendisi filtrelendi');
             return false;
         }
         
         const waitingUser = connections.get(waitingSocket);
         if (!waitingUser) {
-            console.log('⚠️  Kullanıcı verisi yok');
+            console.log('⚠️ Kullanıcı verisi yok');
             return false;
         }
         
         if (waitingSocket.readyState !== WebSocket.OPEN) {
-            console.log('⚠️  WebSocket kapalı');
+            console.log('⚠️ WebSocket kapalı');
+            return false;
+        }
+        
+        // ÖNEMLİ: Aktif görüşmedeki kullanıcıları filtrele
+        if (waitingUser.status === USER_STATUS.IN_CALL) {
+            console.log(`⚠️ ${waitingUser.username} aktif görüşmede - atlandı`);
             return false;
         }
         
         if (activeMatches.has(waitingSocket)) {
-            console.log('⚠️  Zaten aktif eşleşmesi var');
+            console.log('⚠️ Zaten aktif eşleşmesi var');
             return false;
         }
         
-        console.log(`✅ Uygun kullanıcı: ${waitingUser.username}`);
+        // Sadece müsait veya bekleyen kullanıcıları kabul et
+        if (waitingUser.status !== USER_STATUS.AVAILABLE && 
+            waitingUser.status !== USER_STATUS.WAITING) {
+            console.log(`⚠️ ${waitingUser.username} müsait değil (${waitingUser.status})`);
+            return false;
+        }
+        
+        console.log(`✅ Uygun kullanıcı: ${waitingUser.username} (${waitingUser.status})`);
         return true;
     });
 
-    console.log(`🎯 Uygun kullanıcı sayısı: ${availableUsers.length}`);
+    console.log(`🎯 Müsait kullanıcı sayısı: ${availableUsers.length}`);
 
     if (availableUsers.length === 0) {
-        console.log('❌ Uygun kullanıcı bulunamadı');
+        console.log('❌ Müsait kullanıcı bulunamadı');
         return false;
     }
 
@@ -126,6 +205,10 @@ function findMatch(socket) {
     // Her iki kullanıcıyı da bekleme kuyruğundan çıkar
     removeFromWaitingQueue(socket);
     removeFromWaitingQueue(partnerSocket);
+
+    // Kullanıcı durumlarını güncelle - henüz görüşme başlamadı, bağlantı kuruluyor
+    updateUserStatus(socket, USER_STATUS.WAITING);
+    updateUserStatus(partnerSocket, USER_STATUS.WAITING);
 
     // Eşleşmeyi kaydet
     activeMatches.set(socket, partnerSocket);
@@ -172,9 +255,15 @@ function findMatch(socket) {
 
 // Kullanıcıyı bekleme kuyruğuna ekle
 function addToWaitingQueue(socket) {
-    if (!waitingQueue.includes(socket)) {
+    const user = connections.get(socket);
+    
+    // Sadece müsait kullanıcıları kuyruğa ekle
+    if (user && user.status !== USER_STATUS.IN_CALL && !waitingQueue.includes(socket)) {
         waitingQueue.push(socket);
+        updateUserStatus(socket, USER_STATUS.WAITING);
         console.log(`Kullanıcı bekleme kuyruğuna eklendi. Toplam bekleyen: ${waitingQueue.length}`);
+    } else if (user && user.status === USER_STATUS.IN_CALL) {
+        console.log(`⚠️ ${user.username} görüşmede olduğu için kuyruğa eklenmiyor`);
     }
 }
 
@@ -190,8 +279,11 @@ function removeFromWaitingQueue(socket) {
 // Aktif eşleşmeyi sonlandır
 function endMatch(socket) {
     const partnerSocket = activeMatches.get(socket);
+    const currentUser = connections.get(socket);
     
     if (partnerSocket) {
+        const partnerUser = connections.get(partnerSocket);
+        
         // Partner'a ayrılığı bildir
         if (partnerSocket.readyState === WebSocket.OPEN) {
             partnerSocket.send(JSON.stringify({
@@ -202,22 +294,35 @@ function endMatch(socket) {
         // Eşleşmeleri temizle
         activeMatches.delete(socket);
         activeMatches.delete(partnerSocket);
-
-        const currentUser = connections.get(socket);
-        const partnerUser = connections.get(partnerSocket);
         
+        // Kullanıcı durumlarını güncelle
+        if (currentUser) {
+            updateUserStatus(socket, USER_STATUS.AVAILABLE);
+        }
+        if (partnerUser && partnerSocket.readyState === WebSocket.OPEN) {
+            updateUserStatus(partnerSocket, USER_STATUS.AVAILABLE);
+        }
+
         console.log(`Eşleşme sonlandırıldı: ${currentUser?.username || 'Unknown'} <-> ${partnerUser?.username || 'Unknown'}`);
         
-        // Partner'ı tekrar bekleme kuyruğuna ekle (eğer hala bağlıysa)
-        if (partnerSocket.readyState === WebSocket.OPEN && connections.has(partnerSocket)) {
-            addToWaitingQueue(partnerSocket);
+        // Partner'ı tekrar bekleme kuyruğuna ekle (eğer hala bağlıysa ve müsaitse)
+        if (partnerSocket.readyState === WebSocket.OPEN && 
+            connections.has(partnerSocket) && 
+            partnerUser?.status === USER_STATUS.AVAILABLE) {
             
-            // Partner için otomatik eşleşme ara
             setTimeout(() => {
-                if (waitingQueue.includes(partnerSocket)) {
-                    findMatch(partnerSocket);
+                if (connections.has(partnerSocket) && 
+                    !activeMatches.has(partnerSocket)) {
+                    addToWaitingQueue(partnerSocket);
+                    
+                    // Partner için otomatik eşleşme ara
+                    setTimeout(() => {
+                        if (waitingQueue.includes(partnerSocket)) {
+                            findMatch(partnerSocket);
+                        }
+                    }, 1000);
                 }
-            }, 1000);
+            }, 500);
         }
     }
 }
@@ -298,6 +403,14 @@ function handleMessage(socket, data) {
             handleChatMessage(socket, data);
             break;
             
+        case 'call-started':
+            handleCallStarted(socket);
+            break;
+            
+        case 'call-ended':
+            handleCallEnded(socket);
+            break;
+            
         case 'disconnect':
             handleDisconnectRequest(socket);
             break;
@@ -316,6 +429,14 @@ function handleFindPartner(socket, data) {
         return;
     }
 
+    // Mevcut kullanıcıyı kontrol et
+    const existingUser = connections.get(socket);
+    if (existingUser && existingUser.status === USER_STATUS.IN_CALL) {
+        console.log(`⚠️ ${existingUser.username} görüşmede iken yeni partner arayamaz`);
+        sendError(socket, 'Aktif görüşmenizi sonlandırın!');
+        return;
+    }
+
     // Basit kullanıcı ID oluştur (kullanıcı adı bazlı)
     const userId = `${username}_${Date.now()}`;
     
@@ -324,7 +445,9 @@ function handleFindPartner(socket, data) {
         id: userId,
         username: username.trim(),
         socket: socket,
-        joinedAt: new Date()
+        status: USER_STATUS.AVAILABLE,
+        joinedAt: new Date(),
+        statusUpdatedAt: new Date()
     };
     
     connections.set(socket, user);
@@ -345,7 +468,8 @@ function handleFindPartner(socket, data) {
     removeFromWaitingQueue(socket);
     
     console.log(`🔍 ${username} için eşleşme aranıyor...`);
-    console.log(`📊 Mevcut durum: ${waitingQueue.length} bekleyen, ${Math.floor(activeMatches.size / 2)} aktif eşleşme`);
+    const stats = getUserStats();
+    console.log(`📊 Mevcut durum: ${stats.waiting} bekleyen, ${stats.inCall} görüşmede, ${stats.activeMatches} aktif eşleşme`);
     
     // Eşleşme bul
     const matchFound = findMatch(socket);
@@ -358,13 +482,14 @@ function handleFindPartner(socket, data) {
         // Kullanıcıya bekleme durumunu bildir
         socket.send(JSON.stringify({
             type: 'waiting',
-            message: 'Uygun kullanıcı aranıyor...',
-            waitingCount: waitingQueue.length
+            message: 'Müsait kullanıcı aranıyor...',
+            waitingCount: waitingQueue.length,
+            availableUsers: stats.available
         }));
     }
     
     // Kullanıcı sayısını güncelle
-    broadcastUserCount();
+    broadcastUserStats();
 }
 
 function handleOffer(socket, data) {
@@ -420,15 +545,44 @@ function handleChatMessage(socket, data) {
     }
 }
 
+function handleCallStarted(socket) {
+    const user = connections.get(socket);
+    if (user) {
+        updateUserStatus(socket, USER_STATUS.IN_CALL);
+        console.log(`📹 ${user.username} görüntülü görüşmeye başladı`);
+        
+        // Partner'a da aynı durumu bildir
+        const partnerSocket = activeMatches.get(socket);
+        if (partnerSocket) {
+            updateUserStatus(partnerSocket, USER_STATUS.IN_CALL);
+        }
+    }
+}
+
+function handleCallEnded(socket) {
+    const user = connections.get(socket);
+    if (user) {
+        updateUserStatus(socket, USER_STATUS.AVAILABLE);
+        console.log(`📱 ${user.username} görüntülü görüşmeyi sonlandırdı`);
+    }
+}
+
 function handleDisconnectRequest(socket) {
     endMatch(socket);
     removeFromWaitingQueue(socket);
+    
+    const user = connections.get(socket);
+    if (user) {
+        updateUserStatus(socket, USER_STATUS.AVAILABLE);
+    }
     
     // Yeni eşleşme ara
     setTimeout(() => {
         if (socket.readyState === WebSocket.OPEN && connections.has(socket)) {
             const user = connections.get(socket);
-            handleFindPartner(socket, { username: user.username });
+            if (user && user.status === USER_STATUS.AVAILABLE) {
+                handleFindPartner(socket, { username: user.username });
+            }
         }
     }, 500);
 }
@@ -444,16 +598,13 @@ function handleDisconnect(socket) {
     const user = connections.get(socket);
     connections.delete(socket);
     
-    // NOT: userHistory'yi silmiyoruz - böylece kullanıcı tekrar bağlandığında geçmişi hatırlanır
-    // userHistory.delete(user?.id); // Bu satırı kasten yorum yapıyoruz
-    
     if (user) {
-        console.log(`Kullanıcı ayrıldı: ${user.username} (ID: ${user.id})`);
+        console.log(`Kullanıcı ayrıldı: ${user.username} (ID: ${user.id}, Durum: ${user.status})`);
         console.log(`Kullanıcının eşleşme geçmişi korundu: ${userHistory.get(user.id)?.size || 0} partner`);
     }
     
     // Kullanıcı sayısını güncelle
-    setTimeout(broadcastUserCount, 100);
+    setTimeout(broadcastUserStats, 100);
 }
 
 function sendError(socket, message) {
@@ -471,8 +622,8 @@ server.listen(PORT, () => {
     console.log(`🚀 Video Chat Sunucusu başlatıldı!`);
     console.log(`📡 HTTP Server: http://localhost:${PORT}`);
     console.log(`🔌 WebSocket Server: ws://localhost:${PORT}`);
-    console.log(`👥 Maksimum bağlantı: Sınırsız`);
-    console.log('───────────────────────────────────────');
+    console.log(`👥 Gelişmiş kullanıcı durumu koruması aktif`);
+    console.log('─────────────────────────────────────────');
 });
 
 // Periyodik temizlik - kopmuş bağlantıları temizle
@@ -512,7 +663,7 @@ setInterval(() => {
     
     if (cleanedConnections > 0 || cleanedWaiting > 0 || cleanedMatches > 0) {
         console.log(`🧹 Temizlik: ${cleanedConnections} bağlantı, ${cleanedWaiting} bekleme, ${cleanedMatches} eşleşme`);
-        broadcastUserCount();
+        broadcastUserStats();
     }
     
 }, 30000); // Her 30 saniyede bir
@@ -521,16 +672,19 @@ setInterval(() => {
 setInterval(() => {
     const totalHistoryEntries = Array.from(userHistory.values()).reduce((sum, set) => sum + set.size, 0);
     const averageConnections = userHistory.size > 0 ? (totalHistoryEntries / userHistory.size).toFixed(1) : 0;
+    const stats = getUserStats();
     
     console.log('📊 Sunucu İstatistikleri:');
-    console.log(`   👥 Aktif kullanıcı: ${connections.size}`);
-    console.log(`   ⏳ Bekleyen: ${waitingQueue.length}`);
-    console.log(`   💑 Aktif eşleşme: ${Math.floor(activeMatches.size / 2)}`);
+    console.log(`   👥 Toplam kullanıcı: ${stats.total}`);
+    console.log(`   ✅ Müsait kullanıcı: ${stats.available}`);
+    console.log(`   ⏳ Bekleyen: ${stats.waiting}`);
+    console.log(`   📹 Görüşmede: ${stats.inCall}`);
+    console.log(`   🔗 Aktif eşleşme: ${stats.activeMatches}`);
     console.log(`   🔌 WebSocket bağlantısı: ${wss.clients.size}`);
     console.log(`   📚 Kayıtlı kullanıcı geçmişi: ${userHistory.size}`);
     console.log(`   🔄 Ortalama eşleşme/kullanıcı: ${averageConnections}`);
-    console.log(`   ⏱️  Çalışma süresi: ${Math.floor(process.uptime())}s`);
-    console.log('───────────────────────────────────────');
+    console.log(`   ⏱️ Çalışma süresi: ${Math.floor(process.uptime())}s`);
+    console.log('─────────────────────────────────────────');
 }, 60000); // Her dakika
 
 // Graceful shutdown
@@ -558,4 +712,4 @@ process.on('SIGINT', () => {
     }, 1000);
 });
 
-console.log('🎯 Rastgele Video Chat Sunucusu hazır!');
+console.log('🎯 Gelişmiş Rastgele Video Chat Sunucusu hazır!');

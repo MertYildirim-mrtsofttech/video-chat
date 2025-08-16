@@ -94,6 +94,11 @@
             background: linear-gradient(45deg, #4ECDC4, #44A08D);
         }
 
+        .btn.protected {
+            background: linear-gradient(45deg, #ffa726, #ff7043);
+            animation: pulse 2s infinite;
+        }
+
         .video-container {
             display: none;
             grid-template-columns: 1fr 1fr;
@@ -127,6 +132,24 @@
             font-size: 12px;
         }
 
+        .call-status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(76, 175, 80, 0.9);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: bold;
+            display: none;
+        }
+
+        .call-status.active {
+            display: block;
+            animation: pulse 2s infinite;
+        }
+
         .controls {
             display: none;
             justify-content: center;
@@ -156,6 +179,7 @@
         .connecting { background-color: #FF9800; }
         .disconnected { background-color: #F44336; }
         .waiting { background-color: #2196F3; }
+        .in-call { background-color: #9C27B0; }
 
         @keyframes pulse {
             0% { opacity: 1; }
@@ -229,13 +253,37 @@
 
         .user-count {
             background: rgba(255, 255, 255, 0.1);
-            padding: 10px 20px;
+            padding: 15px 20px;
             border-radius: 20px;
             color: white;
             font-size: 14px;
             margin-bottom: 20px;
             text-align: center;
         }
+
+        .stats-row {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 12px;
+            opacity: 0.8;
+        }
+
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .stat-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .stat-available { background-color: #4CAF50; }
+        .stat-waiting { background-color: #2196F3; }
+        .stat-in-call { background-color: #9C27B0; }
 
         @media (max-width: 768px) {
             .video-container {
@@ -253,6 +301,11 @@
 
             .login-section input {
                 width: 100%;
+            }
+
+            .stats-row {
+                flex-direction: column;
+                gap: 5px;
             }
         }
 
@@ -275,6 +328,17 @@
             margin: 10px 0;
             text-align: center;
         }
+
+        .protection-notice {
+            background: rgba(255, 167, 38, 0.2);
+            border: 1px solid rgba(255, 167, 38, 0.4);
+            color: #ffa726;
+            padding: 10px;
+            border-radius: 10px;
+            margin: 10px 0;
+            text-align: center;
+            font-size: 13px;
+        }
     </style>
 </head>
 <body>
@@ -283,8 +347,22 @@
         
         <div class="user-count" id="userCount">
             <span id="onlineUsers">-- çevrimiçi kullanıcı</span>
+            <div class="stats-row">
+                <div class="stat-item">
+                    <div class="stat-indicator stat-available"></div>
+                    <span id="availableCount">-- müsait</span>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-indicator stat-waiting"></div>
+                    <span id="waitingCount">-- bekleyen</span>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-indicator stat-in-call"></div>
+                    <span id="inCallCount">-- görüşmede</span>
+                </div>
+            </div>
             <br>
-            <small style="opacity: 0.8;">💫 Daha önce konuştuklarınızla tekrar eşleşebilirsiniz</small>
+            <small style="opacity: 0.8;">💫 Görüşmede olan kullanıcılar rahatsız edilmez</small>
         </div>
 
         <div class="login-section" id="loginSection">
@@ -302,17 +380,19 @@
             <div class="video-wrapper">
                 <video id="localVideo" muted autoplay playsinline></video>
                 <div class="video-label">Sen</div>
+                <div class="call-status" id="localCallStatus">🔴 CANLI</div>
             </div>
             <div class="video-wrapper">
                 <video id="remoteVideo" autoplay playsinline></video>
                 <div class="video-label" id="remoteLabel">Bekleniyor...</div>
+                <div class="call-status" id="remoteCallStatus">🔴 CANLI</div>
             </div>
         </div>
 
         <div class="controls" id="controls">
             <button class="btn" onclick="toggleVideo()" id="videoBtn">📹 Video Kapat</button>
             <button class="btn" onclick="toggleAudio()" id="audioBtn">🎤 Ses Kapat</button>
-            <button class="btn next" onclick="findNewPartner()" id="nextBtn">⏭️ Sonraki</button>
+            <button class="btn next" onclick="findNewPartner()" id="nextBtn">⭐ Sonraki</button>
             <button class="btn danger" onclick="endChat()">❌ Çık</button>
         </div>
 
@@ -338,8 +418,10 @@
         let isAudioEnabled = true;
         let isConnecting = false;
         let currentPartner = null;
+        let isInCall = false;
+        let callStartTime = null;
 
-        // WebSocket sunucu URL'si (yerel geliştirme için)
+        // WebSocket sunucu URL'si
         const WS_URL = 'wss://video-chat-jozk.onrender.com';
 
         // WebRTC konfigürasyonu
@@ -400,6 +482,7 @@
                     // Değişkenleri sıfırla
                     currentPartner = null;
                     isConnecting = false;
+                    isInCall = false;
                     
                     // 3 saniye sonra yeniden bağlanmayı dene
                     setTimeout(() => {
@@ -489,7 +572,7 @@
             }
             
             isConnecting = true;
-            updateStatus('Rastgele bir kullanıcı aranıyor...', 'waiting');
+            updateStatus('Müsait kullanıcı aranıyor...', 'waiting');
             document.getElementById('nextBtn').disabled = true;
             document.getElementById('remoteLabel').textContent = 'Aranıyor...';
             
@@ -501,25 +584,33 @@
                 username: username
             });
             
-            // 10 saniye timeout ekle
+            // 15 saniye timeout ekle
             setTimeout(() => {
                 if (isConnecting && !currentPartner) {
                     console.log('⏰ Partner arama timeout!');
                     isConnecting = false;
                     document.getElementById('nextBtn').disabled = false;
-                    updateStatus('Uygun kullanıcı bulunamadı. Tekrar deneyin.', 'disconnected');
+                    updateStatus('Müsait kullanıcı bulunamadı. Tekrar deneyin.', 'disconnected');
                 }
-            }, 10000);
+            }, 15000);
         }
 
         function findNewPartner() {
+            // Eğer aktif görüşmedeyse uyar
+            if (isInCall) {
+                if (!confirm('Aktif görüşmeyi sonlandırıp yeni kullanıcı aramak istediğinizden emin misiniz?')) {
+                    return;
+                }
+                endCurrentCall();
+            }
+
             // Mevcut bağlantıyı kes
             if (currentPartner) {
                 disconnectFromPartner();
             }
             
             clearChat();
-            addSystemMessage('🔄 Yeni bir kullanıcı aranıyor... (Daha önce konuştuklarınızla da eşleşebilirsiniz)');
+            addSystemMessage('🔄 Yeni bir kullanıcı aranıyor... (Görüşmede olan kullanıcılar atlanır)');
             
             // Yeni partner ara
             findRandomPartner();
@@ -540,7 +631,10 @@
 
                 case 'waiting':
                     console.log('⏳ Bekleme durumu:', data);
-                    updateStatus(`Uygun kullanıcı aranıyor... (${data.waitingCount} bekleyen)`, 'waiting');
+                    const waitingMsg = data.availableUsers > 0 
+                        ? `Müsait kullanıcı aranıyor... (${data.availableUsers} müsait, ${data.waitingCount} bekleyen)`
+                        : 'Tüm kullanıcılar meşgul... Bekleyin veya daha sonra deneyin.';
+                    updateStatus(waitingMsg, 'waiting');
                     break;
 
                 case 'partner-left':
@@ -571,6 +665,11 @@
                 case 'user-count':
                     console.log('👥 Kullanıcı sayısı güncellendi:', data.count);
                     updateUserCount(data.count);
+                    break;
+
+                case 'user-stats':
+                    console.log('📊 Kullanıcı istatistikleri:', data);
+                    updateUserStats(data);
                     break;
 
                 case 'error':
@@ -621,6 +720,7 @@
             updateStatus('Partner ayrıldı. Yeni kullanıcı aranıyor...', 'waiting');
             addSystemMessage('💔 Karşıdaki kullanıcı ayrıldı. Yeni biri aranıyor...');
             
+            endCurrentCall();
             disconnectFromPartner();
             clearRemoteVideo();
             
@@ -675,7 +775,7 @@
                 console.log('Remote stream alındı');
                 remoteStream = event.streams[0];
                 document.getElementById('remoteVideo').srcObject = remoteStream;
-                updateStatus(`${currentPartner} ile bağlantı kuruldu!`, 'connected');
+                startCall();
             };
 
             // ICE candidates
@@ -693,7 +793,7 @@
                 console.log('Bağlantı durumu:', peerConnection.connectionState);
                 
                 if (peerConnection.connectionState === 'connected') {
-                    updateStatus(`${currentPartner} ile görüntülü görüşme başladı!`, 'connected');
+                    startCall();
                 } else if (peerConnection.connectionState === 'disconnected' || 
                           peerConnection.connectionState === 'failed') {
                     handlePartnerLeft();
@@ -701,7 +801,60 @@
             };
         }
 
+        function startCall() {
+            if (!isInCall) {
+                isInCall = true;
+                callStartTime = new Date();
+                
+                // Görüşme durumunu göster
+                document.getElementById('localCallStatus').classList.add('active');
+                document.getElementById('remoteCallStatus').classList.add('active');
+                
+                // Sonraki butonunu koruma moduna al
+                const nextBtn = document.getElementById('nextBtn');
+                nextBtn.classList.add('protected');
+                nextBtn.title = 'Aktif görüşmeyi sonlandırın';
+                
+                updateStatus(`${currentPartner} ile görüntülü görüşme başladı!`, 'in-call');
+                
+                // Sunucuya bildir
+                sendToServer({
+                    type: 'call-started'
+                });
+                
+                console.log('📹 Görüntülü görüşme başladı');
+                
+                // Koruma uyarısı göster
+                showProtectionNotice();
+            }
+        }
+
+        function endCurrentCall() {
+            if (isInCall) {
+                isInCall = false;
+                callStartTime = null;
+                
+                // Görüşme durumunu gizle
+                document.getElementById('localCallStatus').classList.remove('active');
+                document.getElementById('remoteCallStatus').classList.remove('active');
+                
+                // Sonraki butonunu normal moda al
+                const nextBtn = document.getElementById('nextBtn');
+                nextBtn.classList.remove('protected');
+                nextBtn.title = 'Sonraki kullanıcıya geç';
+                
+                // Sunucuya bildir
+                sendToServer({
+                    type: 'call-ended'
+                });
+                
+                console.log('📱 Görüntülü görüşme sonlandı');
+            }
+        }
+
         function disconnectFromPartner() {
+            endCurrentCall();
+            
             if (peerConnection) {
                 peerConnection.close();
                 peerConnection = null;
@@ -783,6 +936,9 @@
         }
 
         function endChat() {
+            // Aktif görüşmeyi sonlandır
+            endCurrentCall();
+            
             // Bağlantıları kes
             disconnectFromPartner();
             
@@ -817,6 +973,8 @@
             roomId = null;
             currentPartner = null;
             isConnecting = false;
+            isInCall = false;
+            callStartTime = null;
         }
 
         function updateStatus(text, status) {
@@ -827,6 +985,13 @@
 
         function updateUserCount(count) {
             document.getElementById('onlineUsers').textContent = `${count} çevrimiçi kullanıcı`;
+        }
+
+        function updateUserStats(stats) {
+            document.getElementById('onlineUsers').textContent = `${stats.total} çevrimiçi kullanıcı`;
+            document.getElementById('availableCount').textContent = `${stats.available} müsait`;
+            document.getElementById('waitingCount').textContent = `${stats.waiting} bekleyen`;
+            document.getElementById('inCallCount').textContent = `${stats.inCall} görüşmede`;
         }
 
         function sendToServer(data) {
@@ -867,8 +1032,23 @@
             }, 3000);
         }
 
+        function showProtectionNotice() {
+            const noticeDiv = document.createElement('div');
+            noticeDiv.className = 'protection-notice';
+            noticeDiv.innerHTML = '🛡️ Görüşme koruması aktif! Diğer kullanıcılar sizi rahatsız edemez.';
+            
+            const container = document.querySelector('.container');
+            container.appendChild(noticeDiv);
+            
+            setTimeout(() => {
+                noticeDiv.remove();
+            }, 4000);
+        }
+
         // Sayfa kapatılırken temizlik
         window.addEventListener('beforeunload', () => {
+            endCurrentCall();
+            
             if (localStream) {
                 localStream.getTracks().forEach(track => track.stop());
             }
@@ -884,6 +1064,13 @@
         document.getElementById('usernameInput').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
                 startChat();
+            }
+        });
+
+        // Enter tuşu ile mesaj gönderme
+        document.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && document.activeElement.id === 'messageInput') {
+                sendMessage();
             }
         });
     </script>
